@@ -1,0 +1,29 @@
+# Build artifacts
+dist-newstyle/
+dist/
+
+# Cabal / GHC local environment files
+cabal.project.local
+cabal.project.local~
+.ghc.environment.*
+
+# HLS / IDE
+.hie-bios
+.hie/
+.vscode/
+.idea/
+
+# Nix / direnv local state
+.direnv/
+result
+result-*
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
