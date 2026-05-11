@@ -81,6 +81,7 @@ library
 executable SignalDeck
     -- Import common warning flags.
     import:           warnings
+    ghc-options:      -threaded
 
     -- .hs or .lhs file containing the Main module.
     main-is:          Main.hs
@@ -95,7 +96,10 @@ executable SignalDeck
     build-depends:
         base ^>=4.20.1.0,
         SignalDeck,
-        random
+        random,
+        brick,
+        vty,
+        mtl
 
     -- Directories containing source files.
     hs-source-dirs:   app

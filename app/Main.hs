@@ -3,12 +3,21 @@ module Main where
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import Control.Concurrent (threadDelay)
+import Control.Monad.State.Strict (modify)
 import System.Random (randomRIO)
 import SignalDeck.Pure (addSample, parseMetrics, renderDemoFrame, toRows)
+import Brick (App(..), BrickEvent(..), EventM, Widget, attrMap, showFirstCursor, str)
+import qualified Brick.Main as BM
+import qualified Graphics.Vty as V
 
+data Name = Name deriving (Eq, Ord, Show)
+
+data TuiState = TuiState
+  { paused :: Bool
+  }
 
 usage :: String
-usage = unlines ["Usage: ", " signaldeck demo", " signal --help", " signaldeck file <path> (coming later)"]
+usage = unlines ["Usage: ","signaldeck tui", " signaldeck demo", " signaldeck --help", " signaldeck file <path> (coming later)"]
 
 main :: IO ()
 main = do
@@ -23,6 +32,9 @@ main = do
     ["file", path] -> do
       contents <- readFile path
       processFile contents
+
+    ["tui"] ->
+      runTui
 
 
     ["file"] -> do
@@ -58,3 +70,37 @@ demoLoop window = do
   putStrLn (renderDemoFrame window')
   threadDelay 1000000
   demoLoop window'
+
+runTui :: IO()
+runTui = do
+  let initialState = TuiState { paused = False }
+  _ <- BM.defaultMain tuiApp initialState
+  pure ()
+
+tuiApp :: App TuiState e Name
+tuiApp =
+  App
+    { appDraw = drawTui
+    , appChooseCursor = showFirstCursor
+    , appHandleEvent = handleTuiEvent
+    , appStartEvent = pure ()
+    , appAttrMap = const (attrMap V.defAttr [])
+    }
+
+drawTui :: TuiState -> [Widget Name]
+drawTui st =
+  [ str $
+      unlines
+        [ "SignalDeck TUI (Stage 8)"
+        , ""
+        , "[q] quit [space] pause/resume"
+        , "status: " ++ if paused st then "paused" else "running"
+        ]
+  ]
+
+handleTuiEvent :: BrickEvent Name e -> EventM Name TuiState ()
+handleTuiEvent (VtyEvent (V.EvKey (V.KChar 'q') [])) = BM.halt
+handleTuiEvent (VtyEvent (V.EvKey V.KEsc [])) = BM.halt
+handleTuiEvent (VtyEvent (V.EvKey (V.KChar ' ') [])) =
+  modify (\st -> st { paused = not (paused st) })
+handleTuiEvent _ = pure ()
