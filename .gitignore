@@ -27,5 +27,14 @@ Thumbs.db
 *.tmp
 *.swp
 
+# Local agent / prompt notes
 agent.md
 agents.md
+AGENT.md
+AGENTS.md
+prompt.md
+prompts.md
+PROMPT.md
+PROMPTS.md
+*.prompt.md
+*.prompts.md

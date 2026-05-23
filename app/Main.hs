@@ -2,22 +2,55 @@ module Main where
 
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever, void)
 import Control.Monad.State.Strict (modify)
 import System.Random (randomRIO)
-import SignalDeck.Pure (addSample, parseMetrics, renderDemoFrame, toRows)
+import System.IO (BufferMode (NoBuffering), hSetBuffering, isEOF, stdout)
+import SignalDeck.Model
+  ( DeckState (..)
+  , IngestResult (..)
+  , averageWindow
+  , currentSample
+  , defaultWindowSize
+  , emptyDeckState
+  , stepDeck
+  , stepDeckLine
+  , stepDeckLines
+  )
+import SignalDeck.Render
+  ( formatSample
+  , renderDeckFrame
+  , renderSparkline
+  )
 import Brick (App(..), BrickEvent(..), EventM, Widget, attrMap, showFirstCursor, str)
+import Brick.BChan (newBChan, writeBChan)
 import qualified Brick.Main as BM
 import qualified Graphics.Vty as V
 
 data Name = Name deriving (Eq, Ord, Show)
 
+data TuiEvent
+  = NewSample Double
+  deriving (Show)
+
 data TuiState = TuiState
   { paused :: Bool
+  , tuiDeck :: DeckState
   }
 
 usage :: String
-usage = unlines ["Usage: ","signaldeck tui", " signaldeck demo", " signaldeck --help", " signaldeck file <path> (coming later)"]
+usage =
+  unlines
+    [ "Usage:"
+    , " signaldeck tui"
+    , " signaldeck demo"
+    , " signaldeck file <path>"
+    , " signaldeck --help"
+    , ""
+    , "No arguments reads live numeric samples from stdin."
+    , "Example: some_pipeline | signaldeck"
+    ]
 
 main :: IO ()
 main = do
@@ -31,7 +64,7 @@ main = do
 
     ["file", path] -> do
       contents <- readFile path
-      processFile contents
+      processFile ("file: " ++ path) contents
 
     ["tui"] ->
       runTui
@@ -43,41 +76,65 @@ main = do
       exitFailure
 
     [] -> do
-      contents <- getContents
-      processFile contents
+      runStdinStream
 
     _ -> do 
       putStrLn ("Error: Invalid arguments: " ++ show args ++ "\n\n" ++ usage)
 
-processFile :: String -> IO ()
-processFile raw = do
-  let rows = toRows raw
-  let metrics = parseMetrics rows
-  let badCount = length rows - length metrics
-  putStrLn ("Read " ++ show (length rows) ++ " rows (" ++ show badCount ++ " invalid)")
+processFile :: String -> String -> IO ()
+processFile source raw = do
+  let initialState = emptyDeckState source defaultWindowSize
+  let finalState = stepDeckLines initialState (lines raw)
+  putStr (renderDeckFrame finalState)
+
+runStdinStream :: IO ()
+runStdinStream = do
+  hSetBuffering stdout NoBuffering
+  streamLoop (emptyDeckState "stdin" defaultWindowSize)
+
+streamLoop :: DeckState -> IO ()
+streamLoop st = do
+  done <- isEOF
+  if done
+    then pure ()
+    else do
+      raw <- getLine
+      let st' = stepDeckLine st raw
+      clearScreen
+      putStr (renderDeckFrame st')
+      streamLoop st'
 
 runDemo :: IO()
-runDemo = demoLoop []
+runDemo = demoLoop (emptyDeckState "latency_ms" defaultWindowSize)
 
 clearScreen :: IO()
 clearScreen = putStrLn "\ESC[2J\ESC[H"
 
-demoLoop :: [Double] -> IO ()
-demoLoop window = do
+demoLoop :: DeckState -> IO ()
+demoLoop st = do
   sample <- randomRIO (20.0, 80.0)
-  let window' = addSample 20 sample window
+  let st' = stepDeck st (IngestedSample sample)
   clearScreen
-  putStrLn (renderDemoFrame window')
+  putStr (renderDeckFrame st')
   threadDelay 1000000
-  demoLoop window'
+  demoLoop st'
 
 runTui :: IO()
 runTui = do
-  let initialState = TuiState { paused = False }
-  _ <- BM.defaultMain tuiApp initialState
+  eventChan <- newBChan 10
+  void . forkIO . forever $ do
+    sample <- randomRIO (20.0, 80.0)
+    writeBChan eventChan (NewSample sample)
+    threadDelay 1000000
+  let initialState =
+        TuiState
+          { paused = False
+          , tuiDeck = emptyDeckState "demo: latency_ms" defaultWindowSize
+          }
+  _ <- BM.customMainWithDefaultVty (Just eventChan) tuiApp initialState
   pure ()
 
-tuiApp :: App TuiState e Name
+tuiApp :: App TuiState TuiEvent Name
 tuiApp =
   App
     { appDraw = drawTui
@@ -89,16 +146,37 @@ tuiApp =
 
 drawTui :: TuiState -> [Widget Name]
 drawTui st =
-  [ str $
-      unlines
-        [ "SignalDeck TUI (Stage 8)"
-        , ""
-        , "[q] quit [space] pause/resume"
-        , "status: " ++ if paused st then "paused" else "running"
-        ]
-  ]
+  [ str (renderTuiFrame st) ]
 
-handleTuiEvent :: BrickEvent Name e -> EventM Name TuiState ()
+renderTuiFrame :: TuiState -> String
+renderTuiFrame st =
+  unlines
+    [ "SignalDeck TUI (experimental)"
+    , ""
+    , "[q] quit [esc] quit [space] pause/resume"
+    , "status: " ++ if paused st then "paused" else "running"
+    , ""
+    , "source: " ++ deckName deck
+    , if null (deckSamples deck) then "waiting for samples..." else renderSparkline (deckSamples deck)
+    , ""
+    , "current: " ++ maybe "n/a" formatSample (currentSample deck)
+    , "avg: " ++ maybe "n/a" formatSample (averageWindow deck)
+    , "samples: " ++ show (deckValidCount deck)
+    , "window: " ++ show (length (deckSamples deck)) ++ "/" ++ show (deckWindowSize deck)
+    , "invalid rows: " ++ show (deckInvalidCount deck)
+    , "blank rows: " ++ show (deckBlankCount deck)
+    ]
+  where
+    deck = tuiDeck st
+
+handleTuiEvent :: BrickEvent Name TuiEvent -> EventM Name TuiState ()
+handleTuiEvent (AppEvent (NewSample sample)) =
+  modify addTuiSample
+  where
+    addTuiSample st
+      | paused st = st
+      | otherwise =
+          st { tuiDeck = stepDeck (tuiDeck st) (IngestedSample sample) }
 handleTuiEvent (VtyEvent (V.EvKey (V.KChar 'q') [])) = BM.halt
 handleTuiEvent (VtyEvent (V.EvKey V.KEsc [])) = BM.halt
 handleTuiEvent (VtyEvent (V.EvKey (V.KChar ' ') [])) =
